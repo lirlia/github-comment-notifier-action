@@ -2,7 +2,7 @@
 
 [英語(Eng)](./README.md) | [日本語(JP)](./README_jp.md)
 
-This repository exposes a GitHub Action** that converts GitHub comments on a pull request into Slack format and notifies Slack.
+This repository exposes **a GitHub Action that converts GitHub comments on a pull request into Slack format and notifies Slack**.
 
 ## What you can do
 
