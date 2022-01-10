@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "html-to-mrkdwn": "^3.0.0",
+    "node-repl": "^2.0.2"
+  }
+}

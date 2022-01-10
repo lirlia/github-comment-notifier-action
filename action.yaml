@@ -1,0 +1,149 @@
+name: 'GitHub PR comment Notifier to Slack'
+description: 'Notify GitHub comment of Slack channel'
+inputs:
+  slack-webhook-url:
+    description: 'slack webhook url'
+    required: true
+  slack-color:
+    description: 'slack attachment color'
+    required: false
+    default: '24292f'
+
+runs:
+  using: "composite"
+  steps:
+    # https://securitylab.github.com/research/github-actions-untrusted-input/#remediation
+    - name: set env
+      shell: bash
+      env:
+        ISSUE_TITLE: ${{ github.event.issue.title }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        SLACK_COLOR: ${{ inputs.slack-color }}
+        SLACK_WEBHOOK_URL: ${{ inputs.slack-webhook-url }}
+      run: |
+
+        echo "ISSUE_TITLE=$ISSUE_TITLE" >> $GITHUB_ENV
+        echo "PR_TITLE=$PR_TITLE" >> $GITHUB_ENV
+        echo "SLACK_COLOR=$SLACK_COLOR" >> $GITHUB_ENV
+        echo "SLACK_WEBHOOK_URL=$SLACK_WEBHOOK_URL" >> $GITHUB_ENV
+
+        # copy lock file, because of setup-node actions
+        # can not refer to anything other than directly under the repository root
+        cp -p ${{ github.action_path }}/package-lock.json .
+
+    - name: setup node
+      # https://github.com/actions/setup-node/releases/tag/v2.5.0
+      uses: actions/setup-node@04c56d2f954f1e4c69436aa54cfef261a018f458
+      with:
+        node-version: '16'
+        cache: 'npm'
+
+    - name: install packages
+      shell: bash
+      run: npm install
+      working-directory: '${{ github.action_path }}'
+
+    - name: prepare contents
+      shell: bash
+      run: |
+
+        set -x
+
+        function prefail() {
+          echo "$1"
+          exit 1
+        }
+
+        # convert html comments to slack mrkdwn
+        function convert_to_mrkdwn() {
+          (
+            cd ${{ github.action_path }}
+            node_modules/.bin/node-repl \
+              js/convert-html-to-slack-mrkdwn.js \
+              "$COMMENT_BODY_HTML"
+          )
+        }
+
+        function getPRNumberAndSetEnv() {
+          # get PR number
+          [ -z "${{ github.event.issue.number }}" ] || PR_NUMBER="${{ github.event.issue.number }}"
+          [ -z "${{ github.event.pull_request.number }}" ] || PR_NUMBER="${{ github.event.pull_request.number }}"
+          [ -z "$PR_NUMBER" ] && prefail "PR Number is not set"
+
+          echo "PR_NUMBER=$PR_NUMBER" >> $GITHUB_ENV
+        }
+
+        # get Title
+        function getTitleAndSetEnv() {
+          [ -z "$ISSUE_TITLE" ] || PR_TITLE="$ISSUE_TITLE"
+          [ -z "$PR_TITLE" ] || PR_TITLE="$PR_TITLE"
+          [ -z "$PR_TITLE" ] && prefail "PR Title is blank"
+
+          # escape title
+          # https://api.slack.com/reference/surfaces/formatting#escaping
+          PR_TITLE=$(echo $PR_TITLE | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+          echo "PR_TITLE=$PR_TITLE" >> $GITHUB_ENV
+        }
+
+        # get Comment
+        function getCommentsAndSetEnv() {
+          # get HTML comment to convert to Slack mrkdwn
+          echo "${{ github.token }}" | gh auth login --with-token
+          COMMENT_BODY_HTML=$(\
+            gh api \
+              -H "Accept: application/vnd.github.VERSION.html+json" \
+              ${{ github.event.comment.url }} \
+            | jq -r ".body_html"\
+          )
+
+          [ -z "$COMMENT_BODY_HTML" ] && prefail "comments(html) are blank"
+          echo "COMMENT_BODY_HTML:$COMMENT_BODY_HTML"
+
+          # The recommended message size for Slack is 4000 characters.
+          # https://api.slack.com/methods/chat.postMessage#formatting
+          COMMENT_BODY=$(convert_to_mrkdwn | jq -r ".text[0:4000]")
+          [ -z "$COMMENT_BODY" ] && prefail "comments are blank"
+
+          # COMMENT_BODY contains a newline, so write it to GITHUB_ENV with a spell using EOF
+          echo "COMMENT_BODY<<EOF" >> $GITHUB_ENV
+          echo "$COMMENT_BODY" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+        }
+
+        # get and set contents
+        getPRNumberAndSetEnv
+        getTitleAndSetEnv
+        getCommentsAndSetEnv
+
+        # set image url
+        IMAGE_URL=$(convert_to_mrkdwn | jq -r ".image")
+        echo "IMAGE_URL=$IMAGE_URL" >> $GITHUB_ENV
+
+        # set date
+        echo "EPOCH_TIMESTAMP=$(date -u "+%s")" >> $GITHUB_ENV
+
+    - name: Send GitHub Action trigger data to Slack workflow
+      id: slack
+      with:
+        payload: |
+          {
+            "attachments": [
+              {
+                "text": ${{ toJSON(env.COMMENT_BODY) }},
+                "pretext": ${{ toJSON( format('New comment by <https://github.com/{0}|{0}>', github.event.sender.login)) }},
+                "title": ${{toJSON(format('<{0}|Comment on #{1} {2}>', github.event.comment.html_url, env.PR_NUMBER, env.PR_TITLE)) }},
+                "image_url": "${{ env.IMAGE_URL }}",
+                "footer": "<${{ github.event.repository.html_url }}|${{ github.event.repository.full_name }}>",
+                "footer_icon": "https://slack.github.com/static/img/favicon-neutral.png",
+                "ts": ${{ env.EPOCH_TIMESTAMP }},
+                "color": "${{ env.SLACK_COLOR }}",
+                "mrkdwn_in": [
+                  "text"
+                ]
+              }
+            ]
+          }
+      uses: slackapi/slack-github-action@410ae57cff5c6b682b106440be0e6c7eb8c98c9d
+      env:
+        SLACK_WEBHOOK_URL: ${{ env.SLACK_WEBHOOK_URL }}
+        SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
